@@ -1,6 +1,5 @@
 # output files
-result.*
-results.*
+result*
 
 # possible intput files
 repos.txt

@@ -66,7 +66,7 @@ func rateLimitCheck(resp *github.Response) {
 func (rfc *RepoFileCheck) ToCSV() string {
 	var builder strings.Builder
 
-	// Start with owner/repo
+	// owner/repo
 	builder.WriteString(fmt.Sprintf("%s/%s,", rfc.Owner, rfc.Repo))
 
 	// Add each file check result
@@ -78,7 +78,7 @@ func (rfc *RepoFileCheck) ToCSV() string {
 		} else if file.Found {
 			builder.WriteString(fmt.Sprintf("true,%s", file.Path))
 		} else {
-			builder.WriteString("false")
+			builder.WriteString("false,")
 		}
 
 		builder.WriteString(",")
@@ -176,6 +176,7 @@ func main() {
 			fmt.Printf("Invalid format: %s. Expected owner/repo.\n", line)
 			continue
 		}
+		fmt.Println("Respoitory,File,Found,Path,File,Found,Path")
 		owner, repo := parts[0], parts[1]
 		row := getRow(client, owner, repo)
 		fmt.Print(row)
