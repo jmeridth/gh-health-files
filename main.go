@@ -127,6 +127,14 @@ func getRow(client *github.Client, owner string, repo string) string {
 					fileResult.HasError = true
 				}
 			}
+			if !fileResult.Found {
+				// Check the org/owner .github repository
+				found, err := checkFile(client, owner, ".github", chf.Name)
+
+				fileResult.Found = found
+				fileResult.Path = fmt.Sprintf("%s/.github/%s", owner, chf.Name)
+				fileResult.HasError = err != nil
+			}
 		}
 
 		result.Files = append(result.Files, fileResult)

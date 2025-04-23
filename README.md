@@ -34,5 +34,7 @@ The script will output a CSV file with the following columns:
 - `repo`: in the format `owner/repo`
 - `funding`
 - `funding_found`: true, false, or error
+- `funding found location`: the location of the funding file
 - `security`
 - `security_found`: true, false, or error
+- `security found location`: the location of the security file
