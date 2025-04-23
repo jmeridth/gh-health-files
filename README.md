@@ -2,17 +2,17 @@
 
 This is a simple script to check the health of community health files in a GitHub repository. It checks for the presence of the following files:
 
+- `CODE_OF_CONDUCT.md`
+- `CONTRIBUTING.md`
 - `FUNDING.yaml`
+- `GOVERNANCE.md`
 - `SECURITY.md`
+- `SUPPORT.md`
 
 Coming soon:
 
-- `CODE_OF_CONDUCT.md`
-- `CONTRIBUTING.md`
 - `Discussion category forms`
-- `GOVERNANCE.md`
 - `Issue and Pull Request Templates and config.yml`
-- `SUPPORT.md`
 
 [Documentation about Community Health Files](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file#supported-file-types)
 
@@ -32,9 +32,4 @@ Coming soon:
 The script will output a CSV file with the following columns:
 
 - `repo`: in the format `owner/repo`
-- `funding`
-- `funding_found`: true, false, or error
-- `funding found location`: the location of the funding file
-- `security`
-- `security_found`: true, false, or error
-- `security found location`: the location of the security file
+- `found path`: the path of the file (repeated for each file checked)

@@ -39,8 +39,12 @@ type CommunityHealthFile struct {
 }
 
 var communityHealthFiles = []CommunityHealthFile{
+	{"CODE_OF_CONDUCT.md", false, ""},
+	{"CONTRIBUTING.md", false, ""},
 	{"FUNDING.yml", true, ".github/"},
+	{"GOVERNANCE.md", false, ""},
 	{"SECURITY.md", false, ""},
+	{"SUPPORT.md", false, ""},
 }
 
 func checkFile(client *github.Client, owner, repo, filePath string) (bool, error) {
@@ -71,16 +75,11 @@ func (rfc *RepoFileCheck) ToCSV() string {
 
 	// Add each file check result
 	for _, file := range rfc.Files {
-		builder.WriteString(fmt.Sprintf("%s,", file.FileName))
-
 		if file.HasError {
 			builder.WriteString("error")
 		} else if file.Found {
-			builder.WriteString(fmt.Sprintf("true,%s", file.Path))
-		} else {
-			builder.WriteString("false,")
+			builder.WriteString(file.Path)
 		}
-
 		builder.WriteString(",")
 	}
 
@@ -143,6 +142,15 @@ func getRow(client *github.Client, owner string, repo string) string {
 	return result.ToCSV()
 }
 
+func getCSVHeader() string {
+	var builder strings.Builder
+	builder.WriteString("Repository,")
+	for _, chf := range communityHealthFiles {
+		builder.WriteString(fmt.Sprintf("%s,", chf.Name))
+	}
+	return strings.TrimSuffix(builder.String(), ",") + "\n"
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run check_repo_files.go <input_file>")
@@ -169,6 +177,7 @@ func main() {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	fmt.Print(getCSVHeader())
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Split(line, "/")
@@ -176,7 +185,6 @@ func main() {
 			fmt.Printf("Invalid format: %s. Expected owner/repo.\n", line)
 			continue
 		}
-		fmt.Println("Respoitory,File,Found,Path,File,Found,Path")
 		owner, repo := parts[0], parts[1]
 		row := getRow(client, owner, repo)
 		fmt.Print(row)
