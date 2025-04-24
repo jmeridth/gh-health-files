@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/go-github/v53/github"
 	"golang.org/x/oauth2"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 var communityHealthFilePaths = []string{
@@ -34,28 +36,65 @@ type RepoFileCheck struct {
 
 type CommunityHealthFile struct {
 	Name           string `json:"name"`
-	OneLocation    bool   `json:"one_location"`
 	SingleLocation string `json:"single_location"`
 }
 
 var communityHealthFiles = []CommunityHealthFile{
-	{"CODE_OF_CONDUCT.md", false, ""},
-	{"CONTRIBUTING.md", false, ""},
-	{"FUNDING.yml", true, ".github/"},
-	{"GOVERNANCE.md", false, ""},
-	{"SECURITY.md", false, ""},
-	{"SUPPORT.md", false, ""},
+	{"CODE_OF_CONDUCT.md", ""},
+	{"CONTRIBUTING.md", ""},
+	{"FUNDING.yml", ".github/"},
+	{"GOVERNANCE.md", ""},
+	{"SECURITY.md", ""},
+	{"SUPPORT.md", ""},
+}
+
+func generateFileNameVariations(fileName string) []string {
+	var variations []string
+
+	// Add the original file name
+	variations = append(variations, fileName)
+
+	// Replace underscores with dashes
+	if strings.Contains(fileName, "_") {
+		variations = append(variations, strings.ReplaceAll(fileName, "_", "-"))
+	}
+
+	// Replace dashes with underscores
+	if strings.Contains(fileName, "-") {
+		variations = append(variations, strings.ReplaceAll(fileName, "-", "_"))
+	}
+
+	// Convert to lowercase
+	variations = append(variations, strings.ToLower(fileName))
+
+	// Convert to uppercase
+	variations = append(variations, strings.ToUpper(fileName))
+
+	// Title case (capitalize each word)
+	if strings.Contains(fileName, "_") || strings.Contains(fileName, "-") {
+		titleCaser := cases.Title(language.English)
+		titleCase := strings.ReplaceAll(titleCaser.String(strings.ReplaceAll(fileName, "_", " ")), " ", "_")
+		variations = append(variations, titleCase)
+	}
+
+	return variations
 }
 
 func checkFile(client *github.Client, owner, repo, filePath string) (bool, error) {
-	_, _, resp, err := client.Repositories.GetContents(context.Background(), owner, repo, filePath, nil)
-	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			return false, nil
+	variations := generateFileNameVariations(filePath)
+
+	for _, variation := range variations {
+		_, _, resp, err := client.Repositories.GetContents(context.Background(), owner, repo, variation, nil)
+		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				continue // Try the next variation
+			}
+			return false, err // Return error if it's not a 404
 		}
-		return false, err
+		return true, nil // File found
 	}
-	return true, nil
+
+	return false, nil // File not found
 }
 
 func rateLimitCheck(resp *github.Response) {
@@ -102,7 +141,7 @@ func getRow(client *github.Client, owner string, repo string) string {
 			Found:    false,
 		}
 
-		if chf.OneLocation {
+		if chf.SingleLocation != "" {
 			path := fmt.Sprintf("%s%s", chf.SingleLocation, chf.Name)
 			found, err := checkFile(client, owner, repo, path)
 
@@ -126,14 +165,6 @@ func getRow(client *github.Client, owner string, repo string) string {
 					fileResult.HasError = true
 				}
 			}
-			if !fileResult.Found {
-				// Check the org/owner .github repository
-				found, err := checkFile(client, owner, ".github", chf.Name)
-
-				fileResult.Found = found
-				fileResult.Path = fmt.Sprintf("%s/.github/%s", owner, chf.Name)
-				fileResult.HasError = err != nil
-			}
 		}
 
 		result.Files = append(result.Files, fileResult)
@@ -153,7 +184,7 @@ func getCSVHeader() string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run check_repo_files.go <input_file>")
+		fmt.Println("Usage: go run main.go <input_file>")
 		return
 	}
 

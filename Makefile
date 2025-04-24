@@ -16,6 +16,12 @@ build: tidy ## Build the binary
 	@echo "  >  Building binary ..."
 	go build -o community-health-file-checker -ldflags="$(BUILD_FLAGS)"
 
+.PHONY : test
+test: build ## Run tests
+	@echo "  >  Validating code ..."
+	@go vet ./...
+	@go test ./...
+
 .PHONY : tidy
 tidy: ## Get dependencies
 	@echo "  >  Tidying go.mod ..."
