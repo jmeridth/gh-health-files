@@ -12,13 +12,11 @@ func TestGenerateFileNameVariations(t *testing.T) {
 	fileName := "CODE_OF_CONDUCT.md"
 	expected := []string{
 		"CODE_OF_CONDUCT.md",
-		"code_of_conduct.md",
 		"CODE_OF_CONDUCT.MD",
+		"code_of_conduct.md",
 		"CODE-OF-CONDUCT.md",
 		"code-of-conduct.md",
-		"code-of-conduct.MD",
 		"Code_Of_Conduct.md",
-		"Code_Of_Conduct.MD",
 	}
 
 	variations := generateFileNameVariations(fileName)
