@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/google/go-github/v53/github"
 	"golang.org/x/oauth2"
 	"golang.org/x/text/cases"
@@ -49,52 +50,55 @@ var communityHealthFiles = []CommunityHealthFile{
 }
 
 func generateFileNameVariations(fileName string) []string {
-	var variations []string
+	variations := mapset.NewSet[string]()
 
 	// Add the original file name
-	variations = append(variations, fileName)
+	variations.Add(fileName)
 
 	// Replace underscores with dashes
 	if strings.Contains(fileName, "_") {
-		variations = append(variations, strings.ReplaceAll(fileName, "_", "-"))
+		variations.Add(strings.ReplaceAll(fileName, "_", "-"))
+		variations.Add(strings.ReplaceAll(strings.ToLower(fileName), "_", "-"))
 	}
 
 	// Replace dashes with underscores
 	if strings.Contains(fileName, "-") {
-		variations = append(variations, strings.ReplaceAll(fileName, "-", "_"))
+		variations.Add(strings.ReplaceAll(fileName, "-", "_"))
+		variations.Add(strings.ReplaceAll(strings.ToLower(fileName), "_", "-"))
 	}
 
 	// Convert to lowercase
-	variations = append(variations, strings.ToLower(fileName))
+	variations.Add(strings.ToLower(fileName))
 
 	// Convert to uppercase
-	variations = append(variations, strings.ToUpper(fileName))
+	variations.Add(strings.ToUpper(fileName))
 
 	// Title case (capitalize each word)
 	if strings.Contains(fileName, "_") || strings.Contains(fileName, "-") {
 		titleCaser := cases.Title(language.English)
 		titleCase := strings.ReplaceAll(titleCaser.String(strings.ReplaceAll(fileName, "_", " ")), " ", "_")
-		variations = append(variations, titleCase)
+		variations.Add(titleCase)
 	}
 
-	return variations
+	return variations.ToSlice()
 }
 
-func checkFile(client *github.Client, owner, repo, filePath string) (bool, error) {
+func checkFile(client *github.Client, owner, repo, filePath string) (bool, string, error) {
 	variations := generateFileNameVariations(filePath)
 
 	for _, variation := range variations {
+		fmt.Printf("Checking %s/%s: %s\n", owner, repo, variation)
 		_, _, resp, err := client.Repositories.GetContents(context.Background(), owner, repo, variation, nil)
 		if err != nil {
 			if resp != nil && resp.StatusCode == http.StatusNotFound {
 				continue // Try the next variation
 			}
-			return false, err // Return error if it's not a 404
+			return false, "", err // Return error if it's not a 404
 		}
-		return true, nil // File found
+		return true, variation, nil // File found with this variation
 	}
 
-	return false, nil // File not found
+	return false, "", nil // File not found
 }
 
 func rateLimitCheck(resp *github.Response) {
@@ -127,7 +131,6 @@ func (rfc *RepoFileCheck) ToCSV() string {
 	return result + "\n"
 }
 
-// Refactored getRow function
 func getRow(client *github.Client, owner string, repo string) string {
 	result := &RepoFileCheck{
 		Owner: owner,
@@ -143,27 +146,40 @@ func getRow(client *github.Client, owner string, repo string) string {
 
 		if chf.SingleLocation != "" {
 			path := fmt.Sprintf("%s%s", chf.SingleLocation, chf.Name)
-			found, err := checkFile(client, owner, repo, path)
+			found, foundPath, err := checkFile(client, owner, repo, path)
+			if err != nil {
+				fmt.Printf("Error checking file %s in %s/%s: %v\n", path, owner, repo, err)
+			}
 
 			fileResult.Found = found
-			fileResult.Path = path
+			fileResult.Path = foundPath
 			fileResult.HasError = err != nil
 		} else {
 			for _, basePath := range communityHealthFilePaths {
 				path := fmt.Sprintf("%s%s", basePath, chf.Name)
-				found, err := checkFile(client, owner, repo, path)
+				found, foundPath, err := checkFile(client, owner, repo, path)
+				if err != nil {
+					fmt.Printf("Error x checking file %s in %s/%s: %v\n", path, owner, repo, err)
+				}
 
 				if found {
 					fileResult.Found = true
-					fileResult.Path = path
+					fileResult.Path = foundPath
 					fileResult.HasError = err != nil
 					break
 				}
 
-				// Keep track of last error
 				if err != nil {
 					fileResult.HasError = true
 				}
+			}
+			if !fileResult.Found {
+				// Check the org/owner .github repository
+				found, foundPath, err := checkFile(client, owner, ".github", chf.Name)
+
+				fileResult.Found = found
+				fileResult.Path = fmt.Sprintf("%s/.github/%s", owner, foundPath)
+				fileResult.HasError = err != nil
 			}
 		}
 
