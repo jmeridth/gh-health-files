@@ -36,17 +36,16 @@ type RepoFileCheck struct {
 }
 
 type CommunityHealthFile struct {
-	Name           string `json:"name"`
-	SingleLocation string `json:"single_location"`
+	Name string `json:"name"`
 }
 
 var communityHealthFiles = []CommunityHealthFile{
-	{"CODE_OF_CONDUCT.md", ""},
-	{"CONTRIBUTING.md", ""},
-	{"FUNDING.yml", ".github/"},
-	{"GOVERNANCE.md", ""},
-	{"SECURITY.md", ""},
-	{"SUPPORT.md", ""},
+	{"CODE_OF_CONDUCT.md"},
+	{"CONTRIBUTING.md"},
+	{"FUNDING.yml"},
+	{"GOVERNANCE.md"},
+	{"SECURITY.md"},
+	{"SUPPORT.md"},
 }
 
 func generateFileNameVariations(fileName string) []string {
@@ -87,7 +86,6 @@ func checkFile(client *github.Client, owner, repo, filePath string) (bool, strin
 	variations := generateFileNameVariations(filePath)
 
 	for _, variation := range variations {
-		fmt.Printf("Checking %s/%s: %s\n", owner, repo, variation)
 		_, _, resp, err := client.Repositories.GetContents(context.Background(), owner, repo, variation, nil)
 		if err != nil {
 			if resp != nil && resp.StatusCode == http.StatusNotFound {
@@ -144,43 +142,31 @@ func getRow(client *github.Client, owner string, repo string) string {
 			Found:    false,
 		}
 
-		if chf.SingleLocation != "" {
-			path := fmt.Sprintf("%s%s", chf.SingleLocation, chf.Name)
+		for _, basePath := range communityHealthFilePaths {
+			path := fmt.Sprintf("%s%s", basePath, chf.Name)
 			found, foundPath, err := checkFile(client, owner, repo, path)
 			if err != nil {
-				fmt.Printf("Error checking file %s in %s/%s: %v\n", path, owner, repo, err)
+				fmt.Printf("Error x checking file %s in %s/%s: %v\n", path, owner, repo, err)
 			}
+
+			if found {
+				fileResult.Found = true
+				fileResult.Path = foundPath
+				fileResult.HasError = err != nil
+				break
+			}
+
+			if err != nil {
+				fileResult.HasError = true
+			}
+		}
+		if !fileResult.Found {
+			// Check the org/owner .github repository
+			found, foundPath, err := checkFile(client, owner, ".github", chf.Name)
 
 			fileResult.Found = found
-			fileResult.Path = foundPath
+			fileResult.Path = fmt.Sprintf("%s/.github/%s", owner, foundPath)
 			fileResult.HasError = err != nil
-		} else {
-			for _, basePath := range communityHealthFilePaths {
-				path := fmt.Sprintf("%s%s", basePath, chf.Name)
-				found, foundPath, err := checkFile(client, owner, repo, path)
-				if err != nil {
-					fmt.Printf("Error x checking file %s in %s/%s: %v\n", path, owner, repo, err)
-				}
-
-				if found {
-					fileResult.Found = true
-					fileResult.Path = foundPath
-					fileResult.HasError = err != nil
-					break
-				}
-
-				if err != nil {
-					fileResult.HasError = true
-				}
-			}
-			if !fileResult.Found {
-				// Check the org/owner .github repository
-				found, foundPath, err := checkFile(client, owner, ".github", chf.Name)
-
-				fileResult.Found = found
-				fileResult.Path = fmt.Sprintf("%s/.github/%s", owner, foundPath)
-				fileResult.HasError = err != nil
-			}
 		}
 
 		result.Files = append(result.Files, fileResult)
