@@ -203,11 +203,18 @@ func main() {
 	client := github.NewClient(tc)
 
 	file, err := os.Open(inputFile)
+	defer func() {
+		err := file.Close()
+		if err != nil {
+			fmt.Printf("error closing output file %s: %v\n", inputFile, err)
+			return
+		}
+	}()
+
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
 		return
 	}
-	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	fmt.Print(getCSVHeader())
