@@ -2,7 +2,7 @@
 result*
 
 # possible intput files
-repos.txt
+repos*.txt
 
 # binary
 community-health-file-checker

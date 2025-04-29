@@ -82,21 +82,20 @@ func generateFileNameVariations(fileName string) []string {
 	return variations.ToSlice()
 }
 
-func checkFile(client *github.Client, owner, repo, filePath string) (bool, string, error) {
+func checkFile(tree *github.Tree, filePath string) (bool, string) {
 	variations := generateFileNameVariations(filePath)
 
+	// Iterate through the variations
 	for _, variation := range variations {
-		_, _, resp, err := client.Repositories.GetContents(context.Background(), owner, repo, variation, nil)
-		if err != nil {
-			if resp != nil && resp.StatusCode == http.StatusNotFound {
-				continue // Try the next variation
+		// Check if the variation exists in the tree
+		for _, entry := range tree.Entries {
+			if entry.GetPath() == variation {
+				return true, variation // File found
 			}
-			return false, "", err // Return error if it's not a 404
 		}
-		return true, variation, nil // File found with this variation
 	}
 
-	return false, "", nil // File not found
+	return false, "" // File not found
 }
 
 func rateLimitCheck(resp *github.Response) {
@@ -136,6 +135,15 @@ func getRow(client *github.Client, owner string, repo string) string {
 		Files: []FileCheckResult{},
 	}
 
+	// Get the repository tree
+	tree, resp, err := client.Git.GetTree(context.Background(), owner, repo, "HEAD", true)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return fmt.Sprintf("Repository %s/%s not found.\n", owner, repo)
+		}
+		return fmt.Sprintf("Error getting repo file contents: %s/%s: %v\n", owner, repo, err)
+	}
+
 	for _, chf := range communityHealthFiles {
 		fileResult := FileCheckResult{
 			FileName: chf.Name,
@@ -144,29 +152,24 @@ func getRow(client *github.Client, owner string, repo string) string {
 
 		for _, basePath := range communityHealthFilePaths {
 			path := fmt.Sprintf("%s%s", basePath, chf.Name)
-			found, foundPath, err := checkFile(client, owner, repo, path)
-			if err != nil {
-				fmt.Printf("Error x checking file %s in %s/%s: %v\n", path, owner, repo, err)
-			}
-
+			found, foundPath := checkFile(tree, path)
 			if found {
 				fileResult.Found = true
 				fileResult.Path = foundPath
-				fileResult.HasError = err != nil
 				break
 			}
-
-			if err != nil {
-				fileResult.HasError = true
-			}
 		}
-		if !fileResult.Found {
-			// Check the org/owner .github repository
-			found, foundPath, err := checkFile(client, owner, ".github", chf.Name)
 
-			fileResult.Found = found
-			fileResult.Path = fmt.Sprintf("%s/.github/%s", owner, foundPath)
-			fileResult.HasError = err != nil
+		if !fileResult.Found {
+			orgTree, _, _ := client.Git.GetTree(context.Background(), owner, ".github", "HEAD", true)
+			if orgTree != nil {
+				path := fmt.Sprintf("%s%s", ".github/", chf.Name)
+				found, foundPath := checkFile(orgTree, path)
+				if found {
+					fileResult.Found = true
+					fileResult.Path = fmt.Sprintf("%s/%s", owner, foundPath)
+				}
+			}
 		}
 
 		result.Files = append(result.Files, fileResult)
