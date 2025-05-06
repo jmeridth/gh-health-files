@@ -6,8 +6,8 @@ require (
 	github.com/deckarep/golang-set/v2 v2.8.0
 	github.com/google/go-github/v53 v53.2.0
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/oauth2 v0.29.0
-	golang.org/x/text v0.24.0
+	golang.org/x/oauth2 v0.30.0
+	golang.org/x/text v0.25.0
 )
 
 require (
