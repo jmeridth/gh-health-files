@@ -1,13 +1,13 @@
 module github.com/jmeridth/community_health_file_checker
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/deckarep/golang-set/v2 v2.8.0
 	github.com/google/go-github/v53 v53.2.0
-	github.com/stretchr/testify v1.10.0
-	golang.org/x/oauth2 v0.30.0
-	golang.org/x/text v0.28.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/oauth2 v0.31.0
+	golang.org/x/text v0.29.0
 )
 
 require (
