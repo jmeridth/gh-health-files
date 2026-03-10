@@ -18,14 +18,14 @@ Coming soon:
 
 ## Requirements
 
-- Go 1.24 or later
+- Go 1.25 or later
 - an input file (default: repos.txt) with a list of GitHub repositories in the format `owner/repo` (one per line)
 - a GitHub personal access token with `repo` and `read:org` scopes (optional, but recommended for private repositories and decrease rate limits)
 
 ## Usage
 
 1. Clone the repository.
-2. `make csv`
+2. `just csv`
 
 ## Output
 
