@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: go.mod
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b
 
       - name: Unit tests
         run: just test
