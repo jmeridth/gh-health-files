@@ -13,10 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-go@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5.4.0
         with:
           go-version-file: go.mod
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
 
       - name: Unit tests
-        run: |
-          make test
+        run: just test
