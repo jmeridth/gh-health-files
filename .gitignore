@@ -32,3 +32,6 @@ go.work.sum
 
 # env file
 .env
+
+# AI
+**/.claude/*.local.*

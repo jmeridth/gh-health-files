@@ -111,7 +111,7 @@ func (rfc *RepoFileCheck) ToCSV() string {
 	var builder strings.Builder
 
 	// owner/repo
-	builder.WriteString(fmt.Sprintf("%s/%s,", rfc.Owner, rfc.Repo))
+	fmt.Fprintf(&builder, "%s/%s,", rfc.Owner, rfc.Repo)
 
 	// Add each file check result
 	for _, file := range rfc.Files {
@@ -182,7 +182,7 @@ func getCSVHeader() string {
 	var builder strings.Builder
 	builder.WriteString("Repository,")
 	for _, chf := range communityHealthFiles {
-		builder.WriteString(fmt.Sprintf("%s,", chf.Name))
+		fmt.Fprintf(&builder, "%s,", chf.Name)
 	}
 	return strings.TrimSuffix(builder.String(), ",") + "\n"
 }
