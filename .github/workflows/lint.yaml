@@ -15,13 +15,13 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v6.0.2
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5.4.0
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: go.mod
       - name: golangci-lint
         uses: golangci/golangci-lint-action@a3942e2497b224226772d892eebe6a97d3a2a41d
         with:
-          version: v2.1.2
+          version: v2.11.2
