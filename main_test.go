@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -72,4 +73,68 @@ func TestRateLimitWait(t *testing.T) {
 		err := rateLimitWait(context.Background(), nil)
 		require.NoError(t, err)
 	})
+}
+
+func newTestRepoFileCheck() *RepoFileCheck {
+	return &RepoFileCheck{
+		Owner: "octocat",
+		Repo:  "hello-world",
+		Files: []FileCheckResult{
+			{FileName: "CODE_OF_CONDUCT.md", Found: true, Path: ".github/CODE_OF_CONDUCT.md"},
+			{FileName: "CONTRIBUTING.md", Found: false},
+			{FileName: "FUNDING.yml", Found: true, Path: "FUNDING.yml"},
+			{FileName: "GOVERNANCE.md", Found: false},
+			{FileName: "SECURITY.md", Found: true, Path: "docs/SECURITY.md"},
+			{FileName: "SUPPORT.md", Found: false, HasError: true},
+		},
+	}
+}
+
+func TestFormatCSVRow(t *testing.T) {
+	rfc := newTestRepoFileCheck()
+	got := formatCSVRow(rfc)
+	expected := "octocat/hello-world,.github/CODE_OF_CONDUCT.md,,FUNDING.yml,,docs/SECURITY.md,error\n"
+	assert.Equal(t, expected, got)
+}
+
+func TestFormatCSVHeader(t *testing.T) {
+	got := formatCSVHeader()
+	expected := "Repository,CODE_OF_CONDUCT.md,CONTRIBUTING.md,FUNDING.yml,GOVERNANCE.md,SECURITY.md,SUPPORT.md\n"
+	assert.Equal(t, expected, got)
+}
+
+func TestFormatJSON(t *testing.T) {
+	rfc := newTestRepoFileCheck()
+	got, err := formatJSON([]*RepoFileCheck{rfc})
+	require.NoError(t, err)
+
+	var parsed []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(got), &parsed))
+
+	assert.Len(t, parsed, 1)
+	assert.Equal(t, "octocat", parsed[0]["owner"])
+	assert.Equal(t, "hello-world", parsed[0]["repo"])
+
+	files, ok := parsed[0]["files"].([]any)
+	require.True(t, ok)
+	assert.Len(t, files, 6)
+
+	first := files[0].(map[string]any)
+	assert.Equal(t, "CODE_OF_CONDUCT.md", first["file_name"])
+	assert.Equal(t, true, first["found"])
+	assert.Equal(t, ".github/CODE_OF_CONDUCT.md", first["path"])
+}
+
+func TestFormatMarkdownRow(t *testing.T) {
+	rfc := newTestRepoFileCheck()
+	got := formatMarkdownRow(rfc)
+	expected := "| octocat/hello-world | .github/CODE_OF_CONDUCT.md | | FUNDING.yml | | docs/SECURITY.md | error |\n"
+	assert.Equal(t, expected, got)
+}
+
+func TestFormatMarkdownHeader(t *testing.T) {
+	got := formatMarkdownHeader()
+	assert.Contains(t, got, "| Repository |")
+	assert.Contains(t, got, "| CODE_OF_CONDUCT.md |")
+	assert.Contains(t, got, "|---|")
 }

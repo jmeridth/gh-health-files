@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,16 +33,20 @@ var communityHealthFiles = []string{
 }
 
 type FileCheckResult struct {
-	FileName string
-	Found    bool
-	Path     string
-	HasError bool
+	FileName string `json:"file_name"`
+	Found    bool   `json:"found"`
+	Path     string `json:"path,omitempty"`
+	HasError bool   `json:"has_error,omitempty"`
 }
 
 type RepoFileCheck struct {
-	Owner string
-	Repo  string
-	Files []FileCheckResult
+	Owner string            `json:"owner"`
+	Repo  string            `json:"repo"`
+	Files []FileCheckResult `json:"files"`
+}
+
+func (rfc *RepoFileCheck) Repository() string {
+	return rfc.Owner + "/" + rfc.Repo
 }
 
 func generateFileNameVariations(fileName string) []string {
@@ -112,25 +118,7 @@ func rateLimitWait(ctx context.Context, resp *github.Response) error {
 	}
 }
 
-func (rfc *RepoFileCheck) ToCSV() string {
-	var builder strings.Builder
-
-	fmt.Fprintf(&builder, "%s/%s,", rfc.Owner, rfc.Repo)
-
-	for _, file := range rfc.Files {
-		if file.HasError {
-			builder.WriteString("error")
-		} else if file.Found {
-			builder.WriteString(file.Path)
-		}
-		builder.WriteString(",")
-	}
-
-	result := strings.TrimSuffix(builder.String(), ",")
-	return result + "\n"
-}
-
-func getRow(ctx context.Context, client *github.Client, owner, repo string) (string, error) {
+func getRepoFileCheck(ctx context.Context, client *github.Client, owner, repo string) (*RepoFileCheck, error) {
 	result := &RepoFileCheck{
 		Owner: owner,
 		Repo:  repo,
@@ -138,13 +126,13 @@ func getRow(ctx context.Context, client *github.Client, owner, repo string) (str
 
 	tree, resp, err := client.Git.GetTree(ctx, owner, repo, "HEAD", true)
 	if err := rateLimitWait(ctx, resp); err != nil {
-		return "", err
+		return nil, err
 	}
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			return "", fmt.Errorf("repository %s/%s not found", owner, repo)
+			return nil, fmt.Errorf("repository %s/%s not found", owner, repo)
 		}
-		return "", fmt.Errorf("getting repo tree for %s/%s: %w", owner, repo, err)
+		return nil, fmt.Errorf("getting repo tree for %s/%s: %w", owner, repo, err)
 	}
 
 	var orgTree *github.Tree
@@ -169,7 +157,7 @@ func getRow(ctx context.Context, client *github.Client, owner, repo string) (str
 				orgTreeFetched = true
 				orgTree, resp, err = client.Git.GetTree(ctx, owner, ".github", "HEAD", true)
 				if err := rateLimitWait(ctx, resp); err != nil {
-					return "", err
+					return nil, err
 				}
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not fetch org .github repo for %s: %v\n", owner, err)
@@ -188,25 +176,100 @@ func getRow(ctx context.Context, client *github.Client, owner, repo string) (str
 		result.Files = append(result.Files, fileResult)
 	}
 
-	return result.ToCSV(), nil
+	return result, nil
 }
 
-func getCSVHeader() string {
+// Output formatting
+
+func formatCSVHeader() string {
 	var builder strings.Builder
 	builder.WriteString("Repository,")
 	for _, chf := range communityHealthFiles {
-		fmt.Fprintf(&builder, "%s,", chf)
+		builder.WriteString(chf)
+		builder.WriteByte(',')
 	}
 	return strings.TrimSuffix(builder.String(), ",") + "\n"
 }
 
+func formatCSVRow(rfc *RepoFileCheck) string {
+	var builder strings.Builder
+
+	fmt.Fprintf(&builder, "%s,", rfc.Repository())
+
+	for _, file := range rfc.Files {
+		if file.HasError {
+			builder.WriteString("error")
+		} else if file.Found {
+			builder.WriteString(file.Path)
+		}
+		builder.WriteByte(',')
+	}
+
+	return strings.TrimSuffix(builder.String(), ",") + "\n"
+}
+
+func formatJSON(results []*RepoFileCheck) (string, error) {
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshaling JSON: %w", err)
+	}
+	return string(data) + "\n", nil
+}
+
+func formatMarkdownHeader() string {
+	var header, separator strings.Builder
+
+	header.WriteString("| Repository |")
+	separator.WriteString("|---|")
+
+	for _, chf := range communityHealthFiles {
+		fmt.Fprintf(&header, " %s |", chf)
+		separator.WriteString("---|")
+	}
+
+	return header.String() + "\n" + separator.String() + "\n"
+}
+
+func formatMarkdownRow(rfc *RepoFileCheck) string {
+	var builder strings.Builder
+
+	fmt.Fprintf(&builder, "| %s |", rfc.Repository())
+
+	for _, file := range rfc.Files {
+		switch {
+		case file.HasError:
+			builder.WriteString(" error |")
+		case file.Found:
+			fmt.Fprintf(&builder, " %s |", file.Path)
+		default:
+			builder.WriteString(" |")
+		}
+	}
+
+	return builder.String() + "\n"
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: community-health-file-checker <input_file>")
+	format := flag.String("format", "csv", "output format: csv, json, or markdown")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: community-health-file-checker [--format csv|json|markdown] <input_file>\n\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	if flag.NArg() < 1 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	inputFile := os.Args[1]
+	switch *format {
+	case "csv", "json", "markdown":
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown format: %s. Must be csv, json, or markdown.\n", *format)
+		os.Exit(1)
+	}
+
+	inputFile := flag.Arg(0)
 	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
 		fmt.Fprintln(os.Stderr, "Please set the GITHUB_TOKEN environment variable.")
@@ -229,8 +292,17 @@ func main() {
 		}
 	}()
 
+	var results []*RepoFileCheck
+
 	scanner := bufio.NewScanner(file)
-	fmt.Print(getCSVHeader())
+
+	switch *format {
+	case "csv":
+		fmt.Print(formatCSVHeader())
+	case "markdown":
+		fmt.Print(formatMarkdownHeader())
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Split(line, "/")
@@ -240,16 +312,33 @@ func main() {
 		}
 		owner, repo := parts[0], parts[1]
 
-		row, err := getRow(ctx, client, owner, repo)
+		rfc, err := getRepoFileCheck(ctx, client, owner, repo)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error processing %s/%s: %v\n", owner, repo, err)
 			continue
 		}
-		fmt.Print(row)
+
+		switch *format {
+		case "csv":
+			fmt.Print(formatCSVRow(rfc))
+		case "markdown":
+			fmt.Print(formatMarkdownRow(rfc))
+		case "json":
+			results = append(results, rfc)
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *format == "json" {
+		out, err := formatJSON(results)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
 	}
 }
