@@ -9,8 +9,7 @@ import (
 	"strings"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
-	"github.com/google/go-github/v53/github"
+	"github.com/google/go-github/v72/github"
 	"golang.org/x/oauth2"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -20,6 +19,15 @@ var communityHealthFilePaths = []string{
 	"",
 	".github/",
 	"docs/",
+}
+
+var communityHealthFiles = []string{
+	"CODE_OF_CONDUCT.md",
+	"CONTRIBUTING.md",
+	"FUNDING.yml",
+	"GOVERNANCE.md",
+	"SECURITY.md",
+	"SUPPORT.md",
 }
 
 type FileCheckResult struct {
@@ -35,85 +43,80 @@ type RepoFileCheck struct {
 	Files []FileCheckResult
 }
 
-type CommunityHealthFile struct {
-	Name string `json:"name"`
-}
-
-var communityHealthFiles = []CommunityHealthFile{
-	{"CODE_OF_CONDUCT.md"},
-	{"CONTRIBUTING.md"},
-	{"FUNDING.yml"},
-	{"GOVERNANCE.md"},
-	{"SECURITY.md"},
-	{"SUPPORT.md"},
-}
-
 func generateFileNameVariations(fileName string) []string {
-	variations := mapset.NewSet[string]()
+	seen := make(map[string]struct{})
+	var result []string
 
-	// Add the original file name
-	variations.Add(fileName)
+	add := func(s string) {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			result = append(result, s)
+		}
+	}
 
-	// Replace underscores with dashes
+	add(fileName)
+
 	if strings.Contains(fileName, "_") {
-		variations.Add(strings.ReplaceAll(fileName, "_", "-"))
-		variations.Add(strings.ReplaceAll(strings.ToLower(fileName), "_", "-"))
+		add(strings.ReplaceAll(fileName, "_", "-"))
+		add(strings.ReplaceAll(strings.ToLower(fileName), "_", "-"))
 	}
 
-	// Replace dashes with underscores
 	if strings.Contains(fileName, "-") {
-		variations.Add(strings.ReplaceAll(fileName, "-", "_"))
-		variations.Add(strings.ReplaceAll(strings.ToLower(fileName), "_", "-"))
+		add(strings.ReplaceAll(fileName, "-", "_"))
+		add(strings.ReplaceAll(strings.ToLower(fileName), "-", "_"))
 	}
 
-	// Convert to lowercase
-	variations.Add(strings.ToLower(fileName))
+	add(strings.ToLower(fileName))
+	add(strings.ToUpper(fileName))
 
-	// Convert to uppercase
-	variations.Add(strings.ToUpper(fileName))
-
-	// Title case (capitalize each word)
 	if strings.Contains(fileName, "_") || strings.Contains(fileName, "-") {
 		titleCaser := cases.Title(language.English)
 		titleCase := strings.ReplaceAll(titleCaser.String(strings.ReplaceAll(fileName, "_", " ")), " ", "_")
-		variations.Add(titleCase)
+		add(titleCase)
 	}
 
-	return variations.ToSlice()
+	return result
 }
 
 func checkFile(tree *github.Tree, filePath string) (bool, string) {
 	variations := generateFileNameVariations(filePath)
 
-	// Iterate through the variations
 	for _, variation := range variations {
-		// Check if the variation exists in the tree
 		for _, entry := range tree.Entries {
 			if entry.GetPath() == variation {
-				return true, variation // File found
+				return true, variation
 			}
 		}
 	}
 
-	return false, "" // File not found
+	return false, ""
 }
 
-func rateLimitCheck(resp *github.Response) {
-	if resp != nil && resp.Rate.Remaining == 0 {
-		resetTime := time.Until(resp.Rate.Reset.Time)
-		fmt.Printf("Rate limit exceeded. Waiting for %v...\n", resetTime)
-		time.Sleep(resetTime)
+func rateLimitWait(ctx context.Context, resp *github.Response) error {
+	if resp == nil || resp.Rate.Remaining > 0 {
+		return nil
+	}
+
+	resetTime := time.Until(resp.Rate.Reset.Time)
+	if resetTime <= 0 {
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Rate limit exceeded. Waiting for %v...\n", resetTime)
+
+	select {
+	case <-time.After(resetTime):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-// Convert the struct to CSV format
 func (rfc *RepoFileCheck) ToCSV() string {
 	var builder strings.Builder
 
-	// owner/repo
 	fmt.Fprintf(&builder, "%s/%s,", rfc.Owner, rfc.Repo)
 
-	// Add each file check result
 	for _, file := range rfc.Files {
 		if file.HasError {
 			builder.WriteString("error")
@@ -123,36 +126,37 @@ func (rfc *RepoFileCheck) ToCSV() string {
 		builder.WriteString(",")
 	}
 
-	// Remove trailing comma and add newline
 	result := strings.TrimSuffix(builder.String(), ",")
 	return result + "\n"
 }
 
-func getRow(client *github.Client, owner string, repo string) string {
+func getRow(ctx context.Context, client *github.Client, owner, repo string) (string, error) {
 	result := &RepoFileCheck{
 		Owner: owner,
 		Repo:  repo,
-		Files: []FileCheckResult{},
 	}
 
-	// Get the repository tree
-	tree, resp, err := client.Git.GetTree(context.Background(), owner, repo, "HEAD", true)
+	tree, resp, err := client.Git.GetTree(ctx, owner, repo, "HEAD", true)
+	if err := rateLimitWait(ctx, resp); err != nil {
+		return "", err
+	}
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			return fmt.Sprintf("Repository %s/%s not found.\n", owner, repo)
+			return "", fmt.Errorf("repository %s/%s not found", owner, repo)
 		}
-		return fmt.Sprintf("Error getting repo file contents: %s/%s: %v\n", owner, repo, err)
+		return "", fmt.Errorf("getting repo tree for %s/%s: %w", owner, repo, err)
 	}
+
+	var orgTree *github.Tree
+	orgTreeFetched := false
 
 	for _, chf := range communityHealthFiles {
 		fileResult := FileCheckResult{
-			FileName: chf.Name,
-			Found:    false,
+			FileName: chf,
 		}
 
 		for _, basePath := range communityHealthFilePaths {
-			path := fmt.Sprintf("%s%s", basePath, chf.Name)
-			found, foundPath := checkFile(tree, path)
+			found, foundPath := checkFile(tree, basePath+chf)
 			if found {
 				fileResult.Found = true
 				fileResult.Path = foundPath
@@ -161,13 +165,22 @@ func getRow(client *github.Client, owner string, repo string) string {
 		}
 
 		if !fileResult.Found {
-			orgTree, _, _ := client.Git.GetTree(context.Background(), owner, ".github", "HEAD", true)
+			if !orgTreeFetched {
+				orgTreeFetched = true
+				orgTree, resp, err = client.Git.GetTree(ctx, owner, ".github", "HEAD", true)
+				if err := rateLimitWait(ctx, resp); err != nil {
+					return "", err
+				}
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not fetch org .github repo for %s: %v\n", owner, err)
+				}
+			}
+
 			if orgTree != nil {
-				path := fmt.Sprintf("%s%s", ".github/", chf.Name)
-				found, foundPath := checkFile(orgTree, path)
+				found, foundPath := checkFile(orgTree, ".github/"+chf)
 				if found {
 					fileResult.Found = true
-					fileResult.Path = fmt.Sprintf("%s/%s", owner, foundPath)
+					fileResult.Path = owner + "/" + foundPath
 				}
 			}
 		}
@@ -175,29 +188,29 @@ func getRow(client *github.Client, owner string, repo string) string {
 		result.Files = append(result.Files, fileResult)
 	}
 
-	return result.ToCSV()
+	return result.ToCSV(), nil
 }
 
 func getCSVHeader() string {
 	var builder strings.Builder
 	builder.WriteString("Repository,")
 	for _, chf := range communityHealthFiles {
-		fmt.Fprintf(&builder, "%s,", chf.Name)
+		fmt.Fprintf(&builder, "%s,", chf)
 	}
 	return strings.TrimSuffix(builder.String(), ",") + "\n"
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go <input_file>")
-		return
+		fmt.Fprintln(os.Stderr, "Usage: community-health-file-checker <input_file>")
+		os.Exit(1)
 	}
 
 	inputFile := os.Args[1]
 	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
-		fmt.Println("Please set the GITHUB_TOKEN environment variable.")
-		return
+		fmt.Fprintln(os.Stderr, "Please set the GITHUB_TOKEN environment variable.")
+		os.Exit(1)
 	}
 
 	ctx := context.Background()
@@ -206,18 +219,15 @@ func main() {
 	client := github.NewClient(tc)
 
 	file, err := os.Open(inputFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
+		os.Exit(1)
+	}
 	defer func() {
-		err := file.Close()
-		if err != nil {
-			fmt.Printf("error closing output file %s: %v\n", inputFile, err)
-			return
+		if err := file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing file: %v\n", err)
 		}
 	}()
-
-	if err != nil {
-		fmt.Printf("Error opening file: %v\n", err)
-		return
-	}
 
 	scanner := bufio.NewScanner(file)
 	fmt.Print(getCSVHeader())
@@ -225,19 +235,21 @@ func main() {
 		line := scanner.Text()
 		parts := strings.Split(line, "/")
 		if len(parts) != 2 {
-			fmt.Printf("Invalid format: %s. Expected owner/repo.\n", line)
+			fmt.Fprintf(os.Stderr, "Invalid format: %s. Expected owner/repo.\n", line)
 			continue
 		}
 		owner, repo := parts[0], parts[1]
-		row := getRow(client, owner, repo)
+
+		row, err := getRow(ctx, client, owner, repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error processing %s/%s: %v\n", owner, repo, err)
+			continue
+		}
 		fmt.Print(row)
-
-		var resp *github.Response
-
-		rateLimitCheck(resp)
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+		os.Exit(1)
 	}
 }
