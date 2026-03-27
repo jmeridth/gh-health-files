@@ -13,7 +13,7 @@ tidy:
 # Build the binary
 build: tidy
     @echo "  >  Building binary ..."
-    go build -o community-health-file-checker -ldflags="{{build_flags}}"
+    go build -o gh-health-files -ldflags="{{build_flags}}"
 
 # Run go vet
 vet:
@@ -31,36 +31,36 @@ lint:
     @golangci-lint run ./...
 
 # Run the checker and output to stdout
-run: build
+run *args: build
     @echo "  >  Running checker ..."
-    @./community-health-file-checker {{input_file}}
+    @./gh-health-files {{args}}
 
 # Build Windows binary
 build-win: tidy
     @echo "  >  Building Windows binary ..."
-    @env GOOS=windows GOARCH=amd64 go build -o community-health-file-checker.exe
+    @env GOOS=windows GOARCH=amd64 go build -o gh-health-files.exe
 
 # Build Linux binary
 build-linux: tidy
     @echo "  >  Building Linux binary ..."
-    @env GOOS=linux GOARCH=amd64 go build -o community-health-file-checker-linux
+    @env GOOS=linux GOARCH=amd64 go build -o gh-health-files-linux
 
 # Build Darwin binary
 build-darwin: tidy
     @echo "  >  Building Darwin binary ..."
-    @env GOOS=darwin GOARCH=amd64 go build -o community-health-file-checker-darwin
+    @env GOOS=darwin GOARCH=amd64 go build -o gh-health-files-darwin
 
 # Generate CSV
 csv: build
     @echo "  >  Generating results.csv ..."
-    @./community-health-file-checker {{input_file}} > results.csv
+    @./gh-health-files {{input_file}} > results.csv
 
 # Generate JSON
 json: build
     @echo "  >  Generating results.json ..."
-    @./community-health-file-checker --format json {{input_file}} > results.json
+    @./gh-health-files --format json {{input_file}} > results.json
 
 # Generate Markdown
 markdown: build
     @echo "  >  Generating results.md ..."
-    @./community-health-file-checker --format markdown {{input_file}} > results.md
+    @./gh-health-files --format markdown {{input_file}} > results.md
