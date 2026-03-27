@@ -168,6 +168,97 @@ type rateLimitResult struct {
 	ResetAt   string `json:"resetAt"`
 }
 
+// Repository discovery types
+
+type pageInfo struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+type repoNode struct {
+	Name  string `json:"name"`
+	Owner struct {
+		Login string `json:"login"`
+	} `json:"owner"`
+	IsArchived bool `json:"isArchived"`
+	IsFork     bool `json:"isFork"`
+}
+
+type repositoriesConnection struct {
+	PageInfo pageInfo   `json:"pageInfo"`
+	Nodes    []repoNode `json:"nodes"`
+}
+
+// Repository discovery functions
+
+const discoveryPageSize = 100
+
+func buildOrgReposQuery(org string, cursor string) string {
+	afterClause := ""
+	if cursor != "" {
+		afterClause = fmt.Sprintf(`, after: %q`, cursor)
+	}
+	return fmt.Sprintf(`query {
+  organization(login: %q) {
+    repositories(first: %d%s) {
+      pageInfo { hasNextPage endCursor }
+      nodes { name owner { login } isArchived isFork }
+    }
+  }
+  rateLimit { remaining resetAt }
+}`, org, discoveryPageSize, afterClause)
+}
+
+func filterRepos(nodes []repoNode) []repoInput {
+	var repos []repoInput
+	for _, n := range nodes {
+		if n.IsArchived || n.IsFork {
+			continue
+		}
+		repos = append(repos, repoInput{Owner: n.Owner.Login, Repo: n.Name})
+	}
+	return repos
+}
+
+func listOrgRepos(ctx context.Context, httpClient *http.Client, org string) ([]repoInput, error) {
+	var allRepos []repoInput
+	cursor := ""
+
+	for {
+		query := buildOrgReposQuery(org, cursor)
+		resp, err := executeGraphQL(ctx, httpClient, query)
+		if err != nil {
+			return nil, fmt.Errorf("querying org %s repos: %w", org, err)
+		}
+
+		if err := handleRateLimit(ctx, resp); err != nil {
+			return nil, err
+		}
+
+		raw, ok := resp.Data["organization"]
+		if !ok || string(raw) == "null" {
+			return nil, fmt.Errorf("organization %q not found or not accessible", org)
+		}
+
+		var orgData struct {
+			Repositories repositoriesConnection `json:"repositories"`
+		}
+		if err := json.Unmarshal(raw, &orgData); err != nil {
+			return nil, fmt.Errorf("parsing org repos response: %w", err)
+		}
+
+		allRepos = append(allRepos, filterRepos(orgData.Repositories.Nodes)...)
+
+		if !orgData.Repositories.PageInfo.HasNextPage {
+			break
+		}
+		cursor = orgData.Repositories.PageInfo.EndCursor
+	}
+
+	return allRepos, nil
+}
+
+
 // Filename variation generation
 
 func generateFileNameVariations(fileName string) []string {
@@ -557,16 +648,54 @@ func formatMarkdownRow(rfc *RepoFileCheck) string {
 	return builder.String() + "\n"
 }
 
+func readReposFromFile(inputFile string) ([]repoInput, error) {
+	file, err := os.Open(inputFile)
+	if err != nil {
+		return nil, fmt.Errorf("opening file: %w", err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing file: %v\n", err)
+		}
+	}()
+
+	var repos []repoInput
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Split(line, "/")
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "Invalid format: %s. Expected owner/repo.\n", line)
+			continue
+		}
+		repos = append(repos, repoInput{Owner: parts[0], Repo: parts[1]})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading file: %w", err)
+	}
+
+	return repos, nil
+}
+
 func main() {
 	format := flag.String("format", "csv", "output format: csv, json, or markdown")
 	apiURLFlag := flag.String("api-url", "", "GitHub API base URL (default: https://api.github.com, env: GITHUB_API_URL)")
+	orgFlag := flag.String("org", "", "discover and check all repositories in the specified GitHub organization")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: community-health-file-checker [--format csv|json|markdown] [--api-url URL] <input_file>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: gh-health-files [--format csv|json|markdown] [--api-url URL] [--org ORG | <input_file>]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	if flag.NArg() < 1 {
+	hasOrg := *orgFlag != ""
+	hasFile := flag.NArg() >= 1
+
+	if hasOrg && hasFile {
+		fmt.Fprintln(os.Stderr, "Error: --org and input file are mutually exclusive. Use one or the other.")
+		os.Exit(1)
+	}
+
+	if !hasOrg && !hasFile {
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -578,7 +707,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	inputFile := flag.Arg(0)
 	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
 		fmt.Fprintln(os.Stderr, "Please set the GITHUB_TOKEN environment variable.")
@@ -606,31 +734,26 @@ func main() {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(ctx, ts)
 
-	file, err := os.Open(inputFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error closing file: %v\n", err)
-		}
-	}()
-
 	var repos []repoInput
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Split(line, "/")
-		if len(parts) != 2 {
-			fmt.Fprintf(os.Stderr, "Invalid format: %s. Expected owner/repo.\n", line)
-			continue
+
+	if hasOrg {
+		fmt.Fprintf(os.Stderr, "Discovering repositories in %s (excluding archived and forked repos)...\n", *orgFlag)
+		repos, err = listOrgRepos(ctx, httpClient, *orgFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-		repos = append(repos, repoInput{Owner: parts[0], Repo: parts[1]})
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Found %d repositories\n", len(repos))
+		if len(repos) == 0 {
+			fmt.Fprintln(os.Stderr, "No repositories to check.")
+			os.Exit(0)
+		}
+	} else {
+		repos, err = readReposFromFile(flag.Arg(0))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	var allResults []*RepoFileCheck

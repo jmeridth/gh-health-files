@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -576,4 +577,141 @@ func TestInaccessibleRepoSummaryFormat(t *testing.T) {
 	assert.Contains(t, output, "  - org/repo1")
 	assert.Contains(t, output, "  - org/repo2")
 	assert.Contains(t, output, "  - other/repo3")
+}
+
+func TestFilterRepos(t *testing.T) {
+	nodes := []repoNode{
+		{Name: "active-repo", Owner: struct {
+			Login string `json:"login"`
+		}{Login: "myorg"}, IsArchived: false, IsFork: false},
+		{Name: "archived-repo", Owner: struct {
+			Login string `json:"login"`
+		}{Login: "myorg"}, IsArchived: true, IsFork: false},
+		{Name: "forked-repo", Owner: struct {
+			Login string `json:"login"`
+		}{Login: "myorg"}, IsArchived: false, IsFork: true},
+		{Name: "archived-fork", Owner: struct {
+			Login string `json:"login"`
+		}{Login: "myorg"}, IsArchived: true, IsFork: true},
+		{Name: "another-active", Owner: struct {
+			Login string `json:"login"`
+		}{Login: "myorg"}, IsArchived: false, IsFork: false},
+	}
+
+	result := filterRepos(nodes)
+	assert.Len(t, result, 2)
+	assert.Equal(t, "active-repo", result[0].Repo)
+	assert.Equal(t, "myorg", result[0].Owner)
+	assert.Equal(t, "another-active", result[1].Repo)
+}
+
+func TestFilterReposEmpty(t *testing.T) {
+	result := filterRepos(nil)
+	assert.Nil(t, result)
+}
+
+func TestBuildOrgReposQuery(t *testing.T) {
+	t.Run("without cursor", func(t *testing.T) {
+		query := buildOrgReposQuery("myorg", "")
+		assert.Contains(t, query, `organization(login: "myorg")`)
+		assert.Contains(t, query, "repositories(first: 100)")
+		assert.NotContains(t, query, "after:")
+		assert.Contains(t, query, "rateLimit")
+	})
+
+	t.Run("with cursor", func(t *testing.T) {
+		query := buildOrgReposQuery("myorg", "abc123")
+		assert.Contains(t, query, `after: "abc123"`)
+	})
+}
+
+func TestListOrgRepos(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		if callCount == 1 {
+			_, _ = fmt.Fprint(w, `{
+				"data": {
+					"organization": {
+						"repositories": {
+							"pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
+							"nodes": [
+								{"name": "repo1", "owner": {"login": "myorg"}, "isArchived": false, "isFork": false},
+								{"name": "archived", "owner": {"login": "myorg"}, "isArchived": true, "isFork": false},
+								{"name": "fork", "owner": {"login": "myorg"}, "isArchived": false, "isFork": true}
+							]
+						}
+					},
+					"rateLimit": {"remaining": 4999, "resetAt": "2026-01-01T00:00:00Z"}
+				}
+			}`)
+		} else {
+			_, _ = fmt.Fprint(w, `{
+				"data": {
+					"organization": {
+						"repositories": {
+							"pageInfo": {"hasNextPage": false, "endCursor": ""},
+							"nodes": [
+								{"name": "repo2", "owner": {"login": "myorg"}, "isArchived": false, "isFork": false}
+							]
+						}
+					},
+					"rateLimit": {"remaining": 4998, "resetAt": "2026-01-01T00:00:00Z"}
+				}
+			}`)
+		}
+	}))
+	defer server.Close()
+
+	origURL := graphQLURL
+	defer func() { setGraphQLURL(origURL) }()
+	setGraphQLURL(server.URL)
+
+	repos, err := listOrgRepos(context.Background(), server.Client(), "myorg")
+	require.NoError(t, err)
+	assert.Equal(t, 2, callCount, "should paginate with 2 requests")
+	assert.Len(t, repos, 2)
+	assert.Equal(t, "repo1", repos[0].Repo)
+	assert.Equal(t, "repo2", repos[1].Repo)
+}
+
+func TestListOrgReposNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+			"data": {
+				"organization": null,
+				"rateLimit": {"remaining": 4999, "resetAt": "2026-01-01T00:00:00Z"}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	origURL := graphQLURL
+	defer func() { setGraphQLURL(origURL) }()
+	setGraphQLURL(server.URL)
+
+	_, err := listOrgRepos(context.Background(), server.Client(), "nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found or not accessible")
+}
+
+func TestReadReposFromFile(t *testing.T) {
+	t.Run("reads valid file", func(t *testing.T) {
+		tmpFile := t.TempDir() + "/repos.txt"
+		require.NoError(t, os.WriteFile(tmpFile, []byte("owner1/repo1\nowner2/repo2\n"), 0o644))
+
+		repos, err := readReposFromFile(tmpFile)
+		require.NoError(t, err)
+		assert.Len(t, repos, 2)
+		assert.Equal(t, "owner1", repos[0].Owner)
+		assert.Equal(t, "repo1", repos[0].Repo)
+	})
+
+	t.Run("returns error for missing file", func(t *testing.T) {
+		_, err := readReposFromFile("/nonexistent/path")
+		require.Error(t, err)
+	})
 }

@@ -1,4 +1,4 @@
-module github.com/jmeridth/community-health-file-checker
+module github.com/jmeridth/gh-health-files
 
 go 1.26.1
 

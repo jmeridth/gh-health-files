@@ -1,4 +1,4 @@
-# Community Health File Checker
+# gh-health-files
 
 This is a simple script to check the health of community health files in a GitHub repository. It checks for the presence of the following files:
 
@@ -20,7 +20,7 @@ Coming soon:
 
 - Go 1.26 or later
 - [just](https://github.com/casey/just) command runner
-- An input file (default: repos.txt) with a list of GitHub repositories in the format `owner/repo` (one per line)
+- An input file with a list of GitHub repositories in the format `owner/repo` (one per line), or use `--org` to discover repositories automatically
 - A GitHub authentication token (see [Authentication](#authentication) below)
 
 ### Installing just
@@ -64,7 +64,8 @@ Generate an [installation access token](https://docs.github.com/en/apps/creating
 2. Run a target with `just <target>`:
 
 ```bash
-just run          # build and run the checker, output to stdout
+just run repos.txt            # build and run with an input file
+just run --org myorg           # build and run, discover repos in an org
 just csv          # build and run, save output to results.csv
 just json         # build and run, save output to results.json
 just markdown     # build and run, save output to results.md
@@ -75,20 +76,28 @@ just build        # build the binary
 just help         # list all available targets
 ```
 
-The `run` and `csv` targets use `repos.txt` by default. Override with:
-
-```bash
-INPUT_FILE=my-repos.txt just run
-```
-
 ### Options
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
 | `--format` | — | `csv` | Output format: `csv`, `json`, or `markdown` |
+| `--org` | — | — | Discover and check all repositories in the specified GitHub organization |
 | `--api-url` | `GITHUB_API_URL` | `https://api.github.com` | GitHub API base URL (for GitHub Enterprise Server) |
 
+The `--org` flag and input file are mutually exclusive — use one or the other.
+
 The `--api-url` flag takes precedence over the `GITHUB_API_URL` environment variable.
+
+### Organization Discovery
+
+Use `--org` to automatically discover and check all repositories in a GitHub organization:
+
+```bash
+gh-health-files --org myorg
+gh-health-files --org myorg --format json
+```
+
+Archived repositories and forks are excluded from discovery. This keeps results focused on actively maintained, original repositories.
 
 ### GitHub Enterprise Server
 
@@ -96,13 +105,13 @@ To use this tool with a GitHub Enterprise Server instance, provide the API base 
 
 ```bash
 export GITHUB_API_URL=https://github.example.com/api/v3
-community-health-file-checker repos.txt
+gh-health-files repos.txt
 ```
 
 Or via the flag:
 
 ```bash
-community-health-file-checker --api-url https://github.example.com/api/v3 repos.txt
+gh-health-files --api-url https://github.example.com/api/v3 repos.txt
 ```
 
 The tool validates custom API URLs before sending any credentials:
