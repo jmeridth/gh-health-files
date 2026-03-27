@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -22,10 +23,74 @@ const (
 	treeFragment = `{ ... on Tree { entries { name } } }`
 )
 
-var graphQLURL = "https://api.github.com/graphql"
+const defaultAPIURL = "https://api.github.com"
 
-func setGraphQLURL(url string) {
-	graphQLURL = url
+var graphQLURL = defaultAPIURL + "/graphql"
+
+func setGraphQLURL(u string) {
+	graphQLURL = u
+}
+
+func validateAPIURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid API URL %q: %w", rawURL, err)
+	}
+
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid API URL %q: must include scheme and host (e.g. https://github.example.com/api/v3)", rawURL)
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	isLocalhost := host == "localhost" || host == "127.0.0.1" || host == "::1"
+
+	if parsed.Scheme != "https" && !isLocalhost {
+		return fmt.Errorf("API URL must use HTTPS (got %q) — HTTP is only permitted for localhost", parsed.Scheme)
+	}
+
+	return nil
+}
+
+func preflightCheck(ctx context.Context, apiURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("creating preflight request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("preflight request to %s failed: %w", apiURL, err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing preflight response body: %v\n", err)
+		}
+	}()
+
+	if resp.Header.Get("X-GitHub-Request-Id") == "" {
+		return fmt.Errorf("API URL %s does not appear to be a GitHub API endpoint (missing X-GitHub-Request-Id header)", apiURL)
+	}
+
+	return nil
+}
+
+func resolveAPIURL(flagValue string) (string, error) {
+	apiURL := flagValue
+	if apiURL == "" {
+		apiURL = os.Getenv("GITHUB_API_URL")
+	}
+	if apiURL == "" {
+		apiURL = defaultAPIURL
+	}
+
+	apiURL = strings.TrimRight(apiURL, "/")
+
+	if err := validateAPIURL(apiURL); err != nil {
+		return "", err
+	}
+
+	return apiURL, nil
 }
 
 var communityHealthFiles = []string{
@@ -327,7 +392,7 @@ func errorResult(owner, repo string) *RepoFileCheck {
 
 // Batch processing
 
-func processRepoBatch(ctx context.Context, httpClient *http.Client, repos []repoInput) ([]*RepoFileCheck, error) {
+func processRepoBatch(ctx context.Context, httpClient *http.Client, repos []repoInput, inaccessible *[]string) ([]*RepoFileCheck, error) {
 	query := buildRepoQuery(repos)
 	resp, err := executeGraphQL(ctx, httpClient, query)
 	if err != nil {
@@ -343,7 +408,8 @@ func processRepoBatch(ctx context.Context, httpClient *http.Client, repos []repo
 		key := fmt.Sprintf("repo%d", i)
 		raw, ok := resp.Data[key]
 		if !ok || string(raw) == "null" {
-			fmt.Fprintf(os.Stderr, "Warning: repository %s/%s not found or not accessible\n", repo.Owner, repo.Repo)
+			repoFullName := repo.Owner + "/" + repo.Repo
+			*inaccessible = append(*inaccessible, repoFullName)
 			results = append(results, errorResult(repo.Owner, repo.Repo))
 			continue
 		}
@@ -493,8 +559,9 @@ func formatMarkdownRow(rfc *RepoFileCheck) string {
 
 func main() {
 	format := flag.String("format", "csv", "output format: csv, json, or markdown")
+	apiURLFlag := flag.String("api-url", "", "GitHub API base URL (default: https://api.github.com, env: GITHUB_API_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: community-health-file-checker [--format csv|json|markdown] <input_file>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: community-health-file-checker [--format csv|json|markdown] [--api-url URL] <input_file>\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -518,7 +585,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	apiURL, err := resolveAPIURL(*apiURLFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx := context.Background()
+
+	if apiURL != defaultAPIURL {
+		fmt.Fprintf(os.Stderr, "Using custom API URL: %s — ensure this is a trusted GitHub endpoint\n", apiURL)
+		if err := preflightCheck(ctx, apiURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	setGraphQLURL(apiURL + "/graphql")
+
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(ctx, ts)
 
@@ -550,11 +634,12 @@ func main() {
 	}
 
 	var allResults []*RepoFileCheck
+	var inaccessibleRepos []string
 
 	for start := 0; start < len(repos); start += batchSize {
 		end := min(start+batchSize, len(repos))
 
-		results, err := processRepoBatch(ctx, httpClient, repos[start:end])
+		results, err := processRepoBatch(ctx, httpClient, repos[start:end], &inaccessibleRepos)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error processing batch: %v\n", err)
 			os.Exit(1)
@@ -565,6 +650,14 @@ func main() {
 	if err := processOrgFallback(ctx, httpClient, allResults); err != nil {
 		fmt.Fprintf(os.Stderr, "Error processing org fallback: %v\n", err)
 		os.Exit(1)
+	}
+
+	if len(inaccessibleRepos) > 0 {
+		fmt.Fprintf(os.Stderr, "\nThe following %d repository(ies) were not accessible (check token permissions or repository existence):\n", len(inaccessibleRepos))
+		for _, repo := range inaccessibleRepos {
+			fmt.Fprintf(os.Stderr, "  - %s\n", repo)
+		}
+		fmt.Fprintln(os.Stderr)
 	}
 
 	switch *format {

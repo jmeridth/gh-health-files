@@ -15,16 +15,25 @@ build: tidy
     @echo "  >  Building binary ..."
     go build -o community-health-file-checker -ldflags="{{build_flags}}"
 
-# Run tests
-test: build
-    @echo "  >  Validating code ..."
+# Run go vet
+vet:
+    @echo "  >  Vetting code ..."
     @go vet ./...
+
+# Run tests
+test: build vet
+    @echo "  >  Running tests ..."
     @go test ./...
 
 # Run linter
 lint:
     @echo "  >  Running linter ..."
     @golangci-lint run ./...
+
+# Run the checker and output to stdout
+run: build
+    @echo "  >  Running checker ..."
+    @./community-health-file-checker {{input_file}}
 
 # Build Windows binary
 build-win: tidy
@@ -44,4 +53,14 @@ build-darwin: tidy
 # Generate CSV
 csv: build
     @echo "  >  Generating results.csv ..."
-    @go run main.go {{input_file}} > results.csv
+    @./community-health-file-checker {{input_file}} > results.csv
+
+# Generate JSON
+json: build
+    @echo "  >  Generating results.json ..."
+    @./community-health-file-checker --format json {{input_file}} > results.json
+
+# Generate Markdown
+markdown: build
+    @echo "  >  Generating results.md ..."
+    @./community-health-file-checker --format markdown {{input_file}} > results.md

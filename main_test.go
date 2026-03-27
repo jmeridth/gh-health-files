@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -379,4 +380,200 @@ func TestFormatMarkdownHeader(t *testing.T) {
 	assert.Contains(t, got, "| Repository |")
 	assert.Contains(t, got, "| CODE_OF_CONDUCT.md |")
 	assert.Contains(t, got, "|---|")
+}
+
+func TestValidateAPIURL(t *testing.T) {
+	t.Run("accepts default github.com URL", func(t *testing.T) {
+		err := validateAPIURL("https://api.github.com")
+		assert.NoError(t, err)
+	})
+
+	t.Run("accepts GHES URL", func(t *testing.T) {
+		err := validateAPIURL("https://github.example.com/api/v3")
+		assert.NoError(t, err)
+	})
+
+	t.Run("accepts localhost HTTP for testing", func(t *testing.T) {
+		err := validateAPIURL("http://localhost:8080")
+		assert.NoError(t, err)
+	})
+
+	t.Run("accepts 127.0.0.1 HTTP for testing", func(t *testing.T) {
+		err := validateAPIURL("http://127.0.0.1:8080")
+		assert.NoError(t, err)
+	})
+
+	t.Run("rejects HTTP for non-localhost", func(t *testing.T) {
+		err := validateAPIURL("http://github.example.com/api/v3")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must use HTTPS")
+	})
+
+	t.Run("rejects URL without scheme", func(t *testing.T) {
+		err := validateAPIURL("github.example.com/api/v3")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must include scheme and host")
+	})
+
+	t.Run("rejects empty string", func(t *testing.T) {
+		err := validateAPIURL("")
+		require.Error(t, err)
+	})
+}
+
+func TestPreflightCheck(t *testing.T) {
+	t.Run("succeeds with GitHub-like response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-GitHub-Request-Id", "test-id-123")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		err := preflightCheck(context.Background(), server.URL)
+		assert.NoError(t, err)
+	})
+
+	t.Run("fails without GitHub header", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		err := preflightCheck(context.Background(), server.URL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not appear to be a GitHub API endpoint")
+	})
+
+	t.Run("fails when server is unreachable", func(t *testing.T) {
+		err := preflightCheck(context.Background(), "http://localhost:1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "preflight request")
+	})
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(5 * time.Second)
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		err := preflightCheck(ctx, server.URL)
+		require.Error(t, err)
+	})
+}
+
+func TestResolveAPIURL(t *testing.T) {
+	t.Run("uses flag value when provided", func(t *testing.T) {
+		result, err := resolveAPIURL("https://ghes.example.com/api/v3")
+		require.NoError(t, err)
+		assert.Equal(t, "https://ghes.example.com/api/v3", result)
+	})
+
+	t.Run("falls back to env var", func(t *testing.T) {
+		t.Setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3")
+		result, err := resolveAPIURL("")
+		require.NoError(t, err)
+		assert.Equal(t, "https://ghes.example.com/api/v3", result)
+	})
+
+	t.Run("defaults to api.github.com", func(t *testing.T) {
+		t.Setenv("GITHUB_API_URL", "")
+		result, err := resolveAPIURL("")
+		require.NoError(t, err)
+		assert.Equal(t, "https://api.github.com", result)
+	})
+
+	t.Run("strips trailing slash", func(t *testing.T) {
+		result, err := resolveAPIURL("https://ghes.example.com/api/v3/")
+		require.NoError(t, err)
+		assert.Equal(t, "https://ghes.example.com/api/v3", result)
+	})
+
+	t.Run("rejects invalid URL", func(t *testing.T) {
+		_, err := resolveAPIURL("http://evil.example.com")
+		require.Error(t, err)
+	})
+
+	t.Run("flag takes precedence over env", func(t *testing.T) {
+		t.Setenv("GITHUB_API_URL", "https://env.example.com/api/v3")
+		result, err := resolveAPIURL("https://flag.example.com/api/v3")
+		require.NoError(t, err)
+		assert.Equal(t, "https://flag.example.com/api/v3", result)
+	})
+}
+
+func TestProcessRepoBatchInaccessible(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+			"data": {
+				"repo0": null,
+				"repo1": {
+					"root": {"entries": [{"name": "README.md"}]},
+					"dotGithub": null,
+					"docs": null
+				},
+				"repo2": null,
+				"rateLimit": {"remaining": 4999, "resetAt": "2026-01-01T00:00:00Z"}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	origURL := graphQLURL
+	defer func() { setGraphQLURL(origURL) }()
+	setGraphQLURL(server.URL)
+
+	repos := []repoInput{
+		{Owner: "org", Repo: "private-repo"},
+		{Owner: "org", Repo: "public-repo"},
+		{Owner: "org", Repo: "deleted-repo"},
+	}
+
+	var inaccessible []string
+	results, err := processRepoBatch(context.Background(), server.Client(), repos, &inaccessible)
+	require.NoError(t, err)
+	assert.Len(t, results, 3)
+
+	assert.Equal(t, []string{"org/private-repo", "org/deleted-repo"}, inaccessible)
+
+	// Inaccessible repos should have all files marked as errors
+	for _, f := range results[0].Files {
+		assert.True(t, f.HasError, "inaccessible repo files should have HasError=true")
+	}
+
+	// Accessible repo should have normal results
+	assert.False(t, results[1].Files[0].HasError)
+}
+
+func TestPreflightCheckDoesNotSendToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		assert.Empty(t, auth, "preflight request must not include Authorization header")
+		w.Header().Set("X-GitHub-Request-Id", "test-id")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := preflightCheck(context.Background(), server.URL)
+	assert.NoError(t, err)
+}
+
+func TestInaccessibleRepoSummaryFormat(t *testing.T) {
+	inaccessible := []string{"org/repo1", "org/repo2", "other/repo3"}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nThe following %d repository(ies) were not accessible (check token permissions or repository existence):\n", len(inaccessible))
+	for _, repo := range inaccessible {
+		fmt.Fprintf(&b, "  - %s\n", repo)
+	}
+	fmt.Fprintln(&b)
+
+	output := b.String()
+	assert.Contains(t, output, "3 repository(ies)")
+	assert.Contains(t, output, "  - org/repo1")
+	assert.Contains(t, output, "  - org/repo2")
+	assert.Contains(t, output, "  - other/repo3")
 }
